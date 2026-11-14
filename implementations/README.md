@@ -2,8 +2,9 @@
 
 One folder per implementation = one code state on the optimization trail.
 Numbers and context: `../changelog.md`. The **latest** implementation is
-`event-loop/` — `Makefile` (FINAL), the `Dockerfile`, and `docker-compose.yml`
-all point to it. Update those three when promoting a snapshot.
+`event-loop-lazy-buffers/` — `Makefile` (FINAL), the `Dockerfile`, and
+`docker-compose.yml` all point to it. Update those three when promoting a
+snapshot.
 
 | Folder | Changelog entry | `conn_t` | Users @ wall (500 MiB) |
 |---|---|---|---|
@@ -11,7 +12,8 @@ all point to it. Update those three when promoting a snapshot.
 | `event-loop-8k16k/` | event loop + SQLite CRUD | 26,720 B | ~11,000 (est.) |
 | `event-loop-4k8k/` | buffers 8+16 → 4+8 KiB | 14,432 B | 32,004 |
 | `event-loop-4k2k-sockbuf/` | body → 2 KiB + 4 KiB socket buffers; `/_stats` | 8,288 B | 36,038 |
-| `event-loop/` | path 2048 → 256 (**latest**) | 6,496 B | **50,864** |
+| `event-loop/` | path 2048 → 256 | 6,496 B | 50,864 |
+| `event-loop-lazy-buffers/` | lazy request buffers + `Connection: close` fix (**latest**) | 368 B | **~84,800** |
 
 Snapshots differ from `event-loop/brrr.c` only in the constants and routes
 their entry describes (verified: each builds and serves full CRUD; each

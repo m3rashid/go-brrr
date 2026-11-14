@@ -111,13 +111,12 @@ Notes: bodies > 2 KiB get 413 — accepted tradeoff.
 
 -----
 
-# Path buffer 2048 → 256 (latest implementation)
+# Path buffer 2048 → 256
 
 `conn_t` carried 2048 B for paths; routes are /users/<id>. Cut to 256
 (longer paths get 414).
 
-Implementation: `implementations/event-loop/brrr.c` (LATEST — Dockerfile,
-compose, and `make` run this)
+Implementation: `implementations/event-loop/brrr.c`
 
 - `conn_t`: 8,288 → 6,496 B.
 - Users at the wall: 36,038 → 50,864 @ 492.6/500 MB.
@@ -129,6 +128,30 @@ kernel-side memory both designs pay.
 
 -----
 
+# Lazy buffers + `Connection: close` fix (latest implementation)
+
+`conn_t` no longer embeds its worst-case buffers: the request buffer starts
+at 512 B and grows geometrically (to `BUF_MAX`) only when a request needs
+it — idle keep-alive users never grow it. Also fixes a bug found by the new
+test battery: `/`, `/_stats`, list/GET/PUT responses hardcoded keep-alive,
+ignoring `Connection: close` (fixed in every snapshot).
+
+Implementation: `implementations/event-loop-lazy-buffers/brrr.c`
+(LATEST — Dockerfile, compose, `make` run this; container `nofile` raised
+to 1,048,576 so RAM, not the fd table, is the wall)
+
+- `conn_t`: 6,496 → 368 B; ~2.1 KB/userland/user measured (vs 5.9).
+- Users at the wall: 50,864 → **~84,800** (cgroup 492/500 MB, ground-truth
+  connection count via in-container netstat; server alive, drops overflow).
+- Throughput unchanged: 71,141 req/s @ c=200, 60,516 @ c=1000, 0 errors
+  (native: 115,296 @ c=500).
+
+Notes: proof re-synced (eventCost 8192 → 2048) and re-verified. The kernel's
+~3.7 KB/user (socket buffers, skb, epoll items) is now the floor; going
+lower needs 2 KiB socket buffers or a userspace TCP stack.
+
+-----
+
 # Scorecard
 
 | Design (2 vCPU / 500 MiB) | `conn_t` | Users at wall | Failure mode |
@@ -137,10 +160,11 @@ kernel-side memory both designs pay.
 | event loop, 8+16 KiB | 26,720 B | ~11,000 (est.) | drops overflow |
 | event loop, 4+8 KiB | 14,432 B | 32,004 | drops overflow |
 | event loop, 4+2 KiB + socket buffers | 8,288 B | 36,038 | drops overflow |
-| event loop, path 256 (latest) | 6,496 B | **50,864** | drops overflow |
+| event loop, path 256 | 6,496 B | 50,864 | drops overflow |
+| event loop, lazy buffers (latest) | 368 B | **~84,800** | drops overflow |
 
-4.2× the measured baseline in identical RAM, plus graceful failure.
-Final throughput: 69,356 req/s @ c=200, 0 errors.
+7.1× the measured baseline in identical RAM, plus graceful failure.
+Final throughput: 71,141 req/s @ c=200, 0 errors.
 
-Next levers not taken: on-demand body buffer (~4.5 KB/user for GET-only),
-io_uring, SQLite sharding.
+Next levers not taken: 2 KiB socket buffers (~-0.7 KB/user), io_uring,
+SQLite sharding. Assembly would raise throughput, not capacity.

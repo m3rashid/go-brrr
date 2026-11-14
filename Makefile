@@ -3,8 +3,8 @@ CFLAGS ?= -O2 -Wall -Wextra -std=c11
 
 IMPL  = implementations
 # latest implementation: what `make`, the Dockerfile, and docker-compose run.
-# Update this (and the Dockerfile) when promoting a snapshot to the final impl.
-FINAL = $(IMPL)/event-loop
+# Update this (and the Dockerfile) when promoting a new implementation.
+FINAL = $(IMPL)/event-loop-lazy-buffers
 
 all: brrr brrr-threads
 

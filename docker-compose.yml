@@ -3,7 +3,7 @@ services:
     build: .
     image: brrr:latest
     container_name: brrr
-    # runs the LATEST implementation (implementations/event-loop/brrr.c)
+    # runs the LATEST implementation (implementations/event-loop-lazy-buffers/brrr.c)
     command: ["8080", "2"] # 2 workers for the 2 vCPU envelope
     ports:
       - "8080:8080"
@@ -16,8 +16,8 @@ services:
     pids_limit: 64
     ulimits:
       nofile:
-        soft: 65536
-        hard: 65536
+        soft: 1048576 # RAM is the wall now, not the fd table (1 conn = 1 fd)
+        hard: 1048576
     restart: unless-stopped
 
 volumes:

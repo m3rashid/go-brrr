@@ -605,7 +605,7 @@ static void handle_request(poller_t *p, conn_t *c, const char *body, size_t blen
     f = fopen("/sys/fs/cgroup/memory.current", "r");
     if (f) { if (fscanf(f, "%ld", &cg_kb) != 1) cg_kb = 0; fclose(f); }
 #endif
-    resp_begin(&b, c, "HTTP/1.1 200 OK\r\n", 1, NULL);
+    resp_begin(&b, c, "HTTP/1.1 200 OK\r\n", c->keep, NULL);
     sb_reserve(&b, 256);
     b.n += (size_t)snprintf(b.p + b.n, 256,
         "{\"pid\":%d,\"rss_kb\":%ld,\"cgroup_kb\":%ld,\"conns\":%d,\"conn_bytes\":%zu",
@@ -617,7 +617,7 @@ static void handle_request(poller_t *p, conn_t *c, const char *body, size_t blen
 
   if (strcmp(path, "/") == 0) {
     if (m != M_GET && m != M_HEAD) { JSON_ERR(c, 405 Method Not Allowed, "method not allowed"); return; }
-    resp_begin(&b, c, "HTTP/1.1 200 OK\r\n", 1, NULL);
+    resp_begin(&b, c, "HTTP/1.1 200 OK\r\n", c->keep, NULL);
     sb_put(&b, "{\"service\":\"brrr\",\"db\":\"sqlite\",\"users\":\"/users\"}\r\n");
     resp_end(c, &b);
     return;
@@ -625,7 +625,7 @@ static void handle_request(poller_t *p, conn_t *c, const char *body, size_t blen
 
   if (strcmp(path, "/users") == 0) {
     if (m == M_GET || m == M_HEAD) {
-      resp_begin(&b, c, "HTTP/1.1 200 OK\r\n", 1, NULL);
+      resp_begin(&b, c, "HTTP/1.1 200 OK\r\n", c->keep, NULL);
       if (db_list(&b) < 0) { /* db_list may have realloc'd the buffer */
         c->resp = b.p; c->resp_cap = b.cap;
         JSON_ERR(c, 500 Internal Server Error, "db error");
@@ -645,7 +645,7 @@ static void handle_request(poller_t *p, conn_t *c, const char *body, size_t blen
       if (!db_create(name, email, &u)) { JSON_ERR(c, 500 Internal Server Error, "db error"); return; }
       char loc[64];
       snprintf(loc, sizeof loc, "Location: /users/%lld\r\n", u.id);
-      resp_begin(&b, c, "HTTP/1.1 201 Created\r\n", 1, loc);
+      resp_begin(&b, c, "HTTP/1.1 201 Created\r\n", c->keep, loc);
       sb_put(&b, "{\"id\":");
       sb_putu(&b, u.id);
       sb_put(&b, ",\"name\":\"");
@@ -672,7 +672,7 @@ static void handle_request(poller_t *p, conn_t *c, const char *body, size_t blen
       int r = db_read(id, &u);
       if (r < 0) { JSON_ERR(c, 500 Internal Server Error, "db error"); return; }
       if (r == 0) { JSON_ERR(c, 404 Not Found, "no such user"); return; }
-      resp_begin(&b, c, "HTTP/1.1 200 OK\r\n", 1, NULL);
+      resp_begin(&b, c, "HTTP/1.1 200 OK\r\n", c->keep, NULL);
       sb_put(&b, "{\"id\":");
       sb_putu(&b, u.id);
       sb_put(&b, ",\"name\":\"");
@@ -696,7 +696,7 @@ static void handle_request(poller_t *p, conn_t *c, const char *body, size_t blen
       int r = db_update(id, name, email, &u);
       if (r < 0) { JSON_ERR(c, 500 Internal Server Error, "db error"); return; }
       if (r == 0) { JSON_ERR(c, 404 Not Found, "no such user"); return; }
-      resp_begin(&b, c, "HTTP/1.1 200 OK\r\n", 1, NULL);
+      resp_begin(&b, c, "HTTP/1.1 200 OK\r\n", c->keep, NULL);
       sb_put(&b, "{\"id\":");
       sb_putu(&b, u.id);
       sb_put(&b, ",\"name\":\"");

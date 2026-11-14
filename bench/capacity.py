@@ -52,6 +52,12 @@ try:
     print(f"target reached ({TARGET} users) without hitting a wall")
 except (OSError, socket.timeout) as e:
     print(f"wall hit at {START + ok} users: {e!r}")
+    # hold the sockets so ground truth can be sampled from the server
+    import os
+    hold = int(os.environ.get("HOLD_SECONDS", "0"))
+    if hold:
+        print(f"holding {len(socks)} sockets for {hold}s...", flush=True)
+        time.sleep(hold)
 finally:
     for s in socks:
         try: s.close()

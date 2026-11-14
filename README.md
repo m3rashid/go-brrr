@@ -7,7 +7,7 @@ a Lean 4 proof of why this architecture is the right one.
 ```
 Brrr.lean                      the final proof (Lean 4): capacity, optimality, per-event work
 implementations/               one folder per implementation — latest is implementations/event-loop/
-  event-loop/brrr.c            the optimized server (C11, libc + sqlite3 only)
+  event-loop-lazy-buffers/brrr.c   the optimized server (C11, libc + sqlite3 only) — LATEST
   thread-per-connection/       the measured baseline (1 pthread/conn, same API)
 implementations/README.md      folder ↔ changelog entry ↔ measured numbers
 bench/                         keep-alive throughput + capacity probes
@@ -56,7 +56,7 @@ Model: a design maps live connections `n ↦ memory(n)`.
 
 1. **`capacity_event_ge_thread` / `capacity_event_gt_thread`** — in a fixed RAM
    budget `M`, the event loop fits strictly more users than
-   thread-per-connection (a thread costs ≥ 512 KiB; a brrr connection ≤ 24 KiB).
+   thread-per-connection (a thread costs ≥ 512 KiB; a brrr connection ~2 KB).
 2. **`eventDesign_isOptimal`** — no correct server can keep less than
    `stateFloor` per simultaneous user; `eventDesign` spends exactly the floor,
    so it is memory-optimal *within the model*.
@@ -96,14 +96,14 @@ container). Capacity probes run *inside the Docker network*
 
 ### Measured inside the envelope (Alpine 3.20, sqlite 3.45, 2 workers)
 
-| Metric | event loop (`brrr`) | thread-per-conn (`brrr-threads`) |
+| Metric | event loop (latest) | thread-per-conn (baseline) |
 |--------|--------------------|----------------------------------|
 | Throughput, 20k req @ c=50  | — | 56.4k req/s (avg 0.85 ms) |
-| Throughput, 20k req @ c=200 | 69.4k req/s, 0 errors | 52.8k req/s (avg 3.4 ms) |
-| Throughput, 20k req @ c=1000 | — | 39.5k req/s (avg 19.1 ms) |
-| `sizeof(conn_t)` | 6,496 B | 6,496 B (identical by design) |
-| **Concurrent users at the wall** | **50,864** (cgroup 492.6/500 MB) | **12,001** (cgroup 453/500 MB) |
-| Memory per idle user | ~5.9 KB RSS + ~3.8 KB kernel | ~14.5 KB RSS + ~23 KB kernel (stacks) |
+| Throughput, 20k req @ c=200 | 71.1k req/s, 0 errors | 52.8k req/s (avg 3.4 ms) |
+| Throughput, 20k req @ c=1000 | 60.5k req/s | 39.5k req/s (avg 19.1 ms) |
+| `sizeof(conn_t)` | 368 B (buffers lazily grown) | 6,496 B |
+| **Concurrent users at the wall** | **~84,800** (cgroup 492/500 MB) | **12,001** (cgroup 453/500 MB) |
+| Memory per idle user | ~2.1 KB userland + ~3.7 KB kernel | ~14.5 KB RSS + ~23 KB kernel (stacks) |
 | Behavior at the wall | drops overflow, **keeps serving**, `OOMKilled: false` | **kernel OOM-kill, whole server dies** (exit 137) |
 
 ### Optimization trail (users fitting in the same 500 MiB)
@@ -114,12 +114,14 @@ container). Capacity probes run *inside the Docker network*
 | event loop, original buffers (8+16 KiB), default sockets | 26,720 B | ~11,000 (est.) |
 | event loop, 4+8 KiB buffers | 14,432 B | 32,004 |
 | event loop, 4+2 KiB buffers, 4 KiB socket buffers | 8,288 B | 36,038 |
-| event loop, path 2048→256 | 6,496 B | **50,864, survives** |
+| event loop, path 2048→256 | 6,496 B | 50,864 |
+| event loop, lazy request buffers | 368 B | **~84,800, survives** |
 
-Every entry re-measured by holding live connections until the cgroup limit;
-the event loop holds **4.2× the users** of the measured thread baseline in the
-same RAM, and survives the wall instead of being killed (proof Theorem 1
-predicts ≥ 64× at 512 MiB for userland-only memory; the measured gap is
+Every entry re-measured by holding live connections until the cgroup limit
+(ground-truth connection counts from inside the container at the wall);
+the event loop holds **7.1× the users** of the measured thread baseline in
+the same RAM, and survives the wall instead of being killed (proof Theorem 1
+predicts ≥ 256× at 500 MiB for userland-only memory; the measured gap is
 smaller because kernel socket memory and stacks are paid by both designs —
 thread stacks dominate at ~23 KB/user kernel-side).
 

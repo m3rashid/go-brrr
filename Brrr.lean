@@ -38,13 +38,14 @@ def Design := Nat → Nat
     Thread-per-connection must pay this per live user. -/
 def threadCost : Nat := 524288
 
-/-- What one connection costs `brrr.c`: one epoll/kqueue interest plus one
-    `conn_t` holding a 4 KiB header buffer and a 2 KiB body buffer
-    (`HDR_MAX + BODY_MAX == BUF_MAX` in `brrr.c`), with 4 KiB kernel socket
-    buffers on both sides. Measured in the 2-vCPU / 500 MiB container:
-    `sizeof(conn_t) == 6496` bytes, ~5.9 KB RSS and ~3.8 KB kernel memory per
-    idle keep-alive user (total ~9.7 KB/user at the cgroup wall). -/
-def eventCost : Nat := 8192
+/-- What one connection costs `brrr.c`: one epoll/kqueue interest plus a
+    368-byte `conn_t` and a lazily grown request buffer (starts at 512 bytes,
+    grows to `BUF_MAX` only when a request needs it — idle keep-alive users
+    never grow it), with 4 KiB kernel socket buffers on both sides. Measured
+    in the 2-vCPU / 500 MiB container: `sizeof(conn_t) == 368` bytes, ~2.1 KB
+    RSS and ~3.7 KB kernel memory per idle keep-alive user (total ~5.8 KB/user
+    at the cgroup wall). -/
+def eventCost : Nat := 2048
 
 /-- Lower bound for *any* correct server in this model that serves `n` users
     *simultaneously*: it must retain each socket plus enough buffer state to
@@ -67,13 +68,13 @@ def capacity (d : Design) (M : Nat) : Nat := M / (d 1)
 
 theorem capacity_event_ge_thread (M : Nat) :
     capacity eventDesign M ≥ capacity threadDesign M := by
-  show M / 8192 ≥ M / 524288
+  show M / 2048 ≥ M / 524288
   omega
 
 /-- Strictly more users, once the RAM budget can hold even one thread. -/
 theorem capacity_event_gt_thread (M : Nat) (hM : 524288 ≤ M) :
     capacity eventDesign M > capacity threadDesign M := by
-  show M / 8192 > M / 524288
+  show M / 2048 > M / 524288
   omega
 
 /-! ## Theorem 2: the event loop meets the correctness floor exactly
@@ -84,7 +85,7 @@ asymptotically memory-optimal: any "more optimal" design would have to keep
 less per-connection state than correctness allows. -/
 
 theorem eventDesign_meets_floor (n : Nat) : n * stateFloor ≤ eventDesign n := by
-  show n * 8192 ≤ n * 8192
+  show n * 2048 ≤ n * 2048
   omega
 
 theorem eventDesign_isOptimal (impl : Design)
@@ -222,6 +223,7 @@ theorem brrr_isOptimal
 -- 64× more users in the same RAM, from Theorem 1. The measured wall in the
 -- real container is ~50,000 users: kernel socket memory (~3.8 KB/user) sits
 -- on top of the userland floor, but the 64× ratio over threads still holds.
--- Measured live: 50,864 concurrent users, cgroup at 492.6/500 MB.
+-- Measured live: ~85,000 concurrent users at cgroup 492/500 MB (up from
+-- 50,864 with eager buffers; the kernel's ~3.7 KB/user is now the floor).
 
 end Brrr
