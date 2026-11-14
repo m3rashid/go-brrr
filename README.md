@@ -5,10 +5,14 @@ CRUD API — built to host **as many users as possible on cheap hardware**, with
 a Lean 4 proof of why this architecture is the right one.
 
 ```
-proof/Brrr.lean   Lean 4 proof: capacity, optimality, per-event work
-brrr.c            the server (C11, zero dependencies beyond libc + sqlite3)
-Makefile          build + bench targets
-bench.py          keep-alive concurrency benchmark (ab misbehaves on macOS)
+Brrr.lean                      the final proof (Lean 4): capacity, optimality, per-event work
+implementations/               one folder per implementation — latest is implementations/event-loop/
+  event-loop/brrr.c            the optimized server (C11, libc + sqlite3 only)
+  thread-per-connection/       the measured baseline (1 pthread/conn, same API)
+implementations/README.md      folder ↔ changelog entry ↔ measured numbers
+bench/                         keep-alive throughput + capacity probes
+Makefile                       build + bench + proof targets
+changelog.md                   every optimization, measured, over time
 ```
 
 ## Build & run
@@ -32,7 +36,7 @@ threadpool, no GC.
 | Delete    | `DELETE /users/<id>` | –                                   | `204`   |
 
 Errors are JSON: `400` bad JSON, `404` no such user/route, `405` wrong method,
-`413` body > 16 KiB, `431` headers > 8 KiB, `500` db error. `HEAD` works on
+`413` body > 2 KiB, `431` headers > 4 KiB, `500` db error. `HEAD` works on
 every `GET` route.
 
 ```sh
@@ -46,7 +50,7 @@ SQLite runs inside the single event-loop thread: no lock contention, no
 busy-retry storms, WAL journal + `synchronous=NORMAL` for cheap disks.
 Statements are prepared once at startup.
 
-## The proof (`proof/Brrr.lean`)
+## The proof (`Brrr.lean`, repo root)
 
 Model: a design maps live connections `n ↦ memory(n)`.
 
@@ -60,8 +64,7 @@ Model: a design maps live connections `n ↦ memory(n)`.
    epoll/kqueue dispatch costs `O(ready)` per event, never `O(connected)`:
    idle keep-alive users cost dispatch nothing, unlike `poll`/`select`.
 
-Check it: `lean proof/Brrr.lean` (needs a Lean 4 toolchain: `elan`).
-
+Check it: `make proof` (needs a Lean 4 toolchain: `elan`).
 **Honesty note:** "optimal" is relative to the stated model (memory per
 connection, work per readiness event). It does not prove zero latency under
 CPU saturation, correct HTTP parsing, or SQLite durability — those are
@@ -76,6 +79,49 @@ engineering properties, tested below, not proven.
 | 2,000 idle keep-alive conns | ~60 MB RSS (~30 KB/conn); a thread-per-conn design would need ≥ 1 GB |
 
 Throughput stays flat as concurrency grows 5× — that is Theorem 3 in action.
+
+## The container envelope (2 vCPU / 500 MiB)
+
+```sh
+docker compose build && docker compose up -d     # 2 CPUs, 500 MiB, no swap
+docker logs brrr                                 # 2 worker event loops
+curl localhost:8080/_stats                       # live RSS + conn count
+make bench                                       # throughput
+```
+
+The envelope is enforced by cgroups (`memory.max=524288000`,
+`memory.swap.max=0`, `cpu.max=200000/100000` — verified from inside the
+container). Capacity probes run *inside the Docker network*
+(`capacity.py brrr 8080 ...`), several client containers concurrently.
+
+### Measured inside the envelope (Alpine 3.20, sqlite 3.45, 2 workers)
+
+| Metric | event loop (`brrr`) | thread-per-conn (`brrr-threads`) |
+|--------|--------------------|----------------------------------|
+| Throughput, 20k req @ c=50  | — | 56.4k req/s (avg 0.85 ms) |
+| Throughput, 20k req @ c=200 | 69.4k req/s, 0 errors | 52.8k req/s (avg 3.4 ms) |
+| Throughput, 20k req @ c=1000 | — | 39.5k req/s (avg 19.1 ms) |
+| `sizeof(conn_t)` | 6,496 B | 6,496 B (identical by design) |
+| **Concurrent users at the wall** | **50,864** (cgroup 492.6/500 MB) | **12,001** (cgroup 453/500 MB) |
+| Memory per idle user | ~5.9 KB RSS + ~3.8 KB kernel | ~14.5 KB RSS + ~23 KB kernel (stacks) |
+| Behavior at the wall | drops overflow, **keeps serving**, `OOMKilled: false` | **kernel OOM-kill, whole server dies** (exit 137) |
+
+### Optimization trail (users fitting in the same 500 MiB)
+
+| Step | conn_t | Users at the wall |
+|------|--------|-------------------|
+| thread-per-connection baseline | 6,496 B | 12,001 → **OOM-killed** |
+| event loop, original buffers (8+16 KiB), default sockets | 26,720 B | ~11,000 (est.) |
+| event loop, 4+8 KiB buffers | 14,432 B | 32,004 |
+| event loop, 4+2 KiB buffers, 4 KiB socket buffers | 8,288 B | 36,038 |
+| event loop, path 2048→256 | 6,496 B | **50,864, survives** |
+
+Every entry re-measured by holding live connections until the cgroup limit;
+the event loop holds **4.2× the users** of the measured thread baseline in the
+same RAM, and survives the wall instead of being killed (proof Theorem 1
+predicts ≥ 64× at 512 MiB for userland-only memory; the measured gap is
+smaller because kernel socket memory and stacks are paid by both designs —
+thread stacks dominate at ~23 KB/user kernel-side).
 
 ## Known limits
 

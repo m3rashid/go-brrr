@@ -51,9 +51,9 @@
 
 /* ---- constants (match proof/Brrr.lean) --------------------------------- */
 
-#define HDR_MAX        8192   /* request header cap                 */
-#define BODY_MAX       16384  /* request body cap                   */
-#define BUF_MAX        (HDR_MAX + BODY_MAX)  /* == eventCost (24 KiB) */
+#define HDR_MAX        8192   /* request header cap                  */
+#define BODY_MAX       16384  /* request body cap                    */
+#define BUF_MAX        (HDR_MAX + BODY_MAX)  /* 24 KiB */
 #define PATH_MAX_LEN   2048
 #define LIST_LIMIT     200
 #define BACKLOG        4096
@@ -120,6 +120,7 @@ typedef struct conn {
 } conn_t;
 
 static conn_t *live_head;
+static int live_count;       /* real connections currently linked */
 static conn_t listener_conn; /* sentinel: poller events with this ptr => accept */
 
 /* forward decls (used before defined) */
@@ -258,12 +259,14 @@ static void link_conn(conn_t *c) {
   c->next = live_head;
   if (live_head) live_head->prev = c;
   live_head = c;
+  live_count++;
 }
 
 static void unlink_conn(conn_t *c) {
   if (c->prev) c->prev->next = c->next; else live_head = c->next;
   if (c->next) c->next->prev = c->prev;
   c->prev = c->next = NULL;
+  live_count--;
 }
 
 /* case-insensitive find of `pat` in b[0..n); returns index or -1 */
@@ -402,6 +405,11 @@ static void db_open(void) {
       "PRAGMA journal_mode=WAL;"
       "PRAGMA synchronous=NORMAL;"
       "PRAGMA foreign_keys=ON;"
+      /* cheap-RAM tuning: bounded page cache, small WAL, mmap the db file */
+      "PRAGMA cache_size=-8000;"          /* 8 MiB page cache per worker */
+      "PRAGMA mmap_size=134217728;"       /* file-backed reads via mmap  */
+      "PRAGMA wal_autocheckpoint=128;"    /* keep the WAL ~512 KiB       */
+      "PRAGMA temp_store=MEMORY;"
       "CREATE TABLE IF NOT EXISTS users ("
       " id INTEGER PRIMARY KEY AUTOINCREMENT,"
       " name TEXT NOT NULL,"
@@ -845,6 +853,18 @@ static void accept_all(poller_t *p, int s) {
 #endif
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    /* kernel-level backstop for dead peers between app sweeps */
+#ifdef TCP_KEEPIDLE
+    int idle = IDLE_TIMEOUT, intvl = 10, cnt = 3;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof idle);
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof intvl);
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof cnt);
+#elif defined(TCP_KEEPALIVE)
+    int idle = IDLE_TIMEOUT;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &idle, sizeof idle);
+#endif
+    int enable = 1;
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &enable, sizeof enable);
 
     conn_t *c = calloc(1, sizeof *c);
     if (!c) { close(fd); continue; } /* out of RAM: drop, keep serving */
@@ -866,11 +886,10 @@ static void sweep(poller_t *p, time_t now) {
   }
 }
 
-/* ---- main ------------------------------------------------------------------ */
+/* ---- worker: one process = one event loop = one core ---------------------- */
 
-int main(int argc, char **argv) {
-  int port = argc > 1 ? atoi(argv[1]) : 8080;
-  signal(SIGPIPE, SIG_IGN);
+static void run_worker(int port) {
+  /* SQLite must not be shared across fork(): each worker opens its own */
   db_open();
 
   /* use every fd the kernel allows */
@@ -883,10 +902,15 @@ int main(int argc, char **argv) {
   int s = socket(AF_INET6, SOCK_STREAM, 0);
   int family = AF_INET6;
   if (s < 0) { family = AF_INET; s = socket(AF_INET, SOCK_STREAM, 0); }
-  if (s < 0) { perror("socket"); return 1; }
+  if (s < 0) { perror("socket"); exit(1); }
 
   int one = 1, zero = 0;
   setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  /* SO_REUSEPORT: every worker binds the same port; the kernel hashes
+   * incoming connections across listeners => one hot accept queue per core */
+#ifdef SO_REUSEPORT
+  setsockopt(s, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+#endif
   if (family == AF_INET6)
     setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof zero);
 
@@ -896,21 +920,21 @@ int main(int argc, char **argv) {
     a.sin6_family = AF_INET6;
     a.sin6_addr = in6addr_any;
     a.sin6_port = htons((uint16_t)port);
-    if (bind(s, (struct sockaddr *)&a, sizeof a) < 0) { perror("bind"); return 1; }
+    if (bind(s, (struct sockaddr *)&a, sizeof a) < 0) { perror("bind"); exit(1); }
   } else {
     struct sockaddr_in a;
     memset(&a, 0, sizeof a);
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_ANY);
     a.sin_port = htons((uint16_t)port);
-    if (bind(s, (struct sockaddr *)&a, sizeof a) < 0) { perror("bind"); return 1; }
+    if (bind(s, (struct sockaddr *)&a, sizeof a) < 0) { perror("bind"); exit(1); }
   }
 
   int backlog = BACKLOG;
 #ifdef SOMAXCONN
   if (SOMAXCONN > 0 && SOMAXCONN < backlog) backlog = SOMAXCONN;
 #endif
-  if (listen(s, backlog) < 0) { perror("listen"); return 1; }
+  if (listen(s, backlog) < 0) { perror("listen"); exit(1); }
   set_nonblock(s);
 
   poller_t p;
@@ -922,8 +946,9 @@ int main(int argc, char **argv) {
   listener_conn.last_active = time(NULL);
   poller_watch(&p, &listener_conn, 1, 0);
 
-  fprintf(stderr, "brrr: listening on [::]:%d (1 thread, 0 locks, %zu B/conn, "
-                  "sqlite %s)\n", port, sizeof(conn_t), sqlite3_libversion());
+  fprintf(stderr, "brrr[%d]: listening on [::]:%d (1 thread, 0 locks, "
+                  "%zu B/conn, sqlite %s)\n", getpid(), port, sizeof(conn_t),
+                  sqlite3_libversion());
 
   time_t last_sweep = time(NULL);
   for (;;) {
@@ -940,4 +965,23 @@ int main(int argc, char **argv) {
       else if (ev_read(&p, i)) on_readable(&p, c);
     }
   }
+}
+
+/* ---- main ------------------------------------------------------------------ */
+
+int main(int argc, char **argv) {
+  int port = argc > 1 ? atoi(argv[1]) : 8080;
+  int workers = argc > 2 ? atoi(argv[2]) : 1;
+  if (workers < 1) workers = 1;
+
+  signal(SIGPIPE, SIG_IGN);
+  signal(SIGCHLD, SIG_IGN); /* workers are fire-and-forget: no zombies */
+
+  /* fork workers-1 extra event loops; the parent runs one too. Each worker
+   * is a full Theorem-1..3 instance: 1 thread, 0 locks, floor memory. */
+  for (int i = 1; i < workers; i++)
+    if (fork() == 0) break; /* child: stop forking, become a worker */
+
+  run_worker(port);
+  return 0;
 }

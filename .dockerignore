@@ -1,0 +1,9 @@
+brrr
+brrr-threads
+brrr.db
+brrr.db-shm
+brrr.db-wal
+brrr_asan*
+*.dSYM
+.git
+bench

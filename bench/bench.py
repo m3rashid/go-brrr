@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Simple concurrency benchmark for brrr (keep-alive, epoll-friendlier than ab)."""
-import asyncio, sys, time
+import asyncio, os, sys, time
 
-HOST, PORT = "127.0.0.1", int(sys.argv[1]) if len(sys.argv) > 1 else 18080
+HOST = os.environ.get("BENCH_HOST", "127.0.0.1")
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 18080
 TOTAL = int(sys.argv[2]) if len(sys.argv) > 2 else 50000
 CONC = int(sys.argv[3]) if len(sys.argv) > 3 else 200
 
@@ -17,6 +18,7 @@ async def worker(n_reqs, stats):
             writer.write(REQ)
             await writer.drain()
             # read status line + headers + body
+            clen = 0
             while True:
                 line = await reader.readline()
                 if line in (b"\r\n", b""):

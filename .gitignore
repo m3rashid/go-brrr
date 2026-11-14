@@ -1,0 +1,12 @@
+# build artifacts
+brrr
+brrr-threads
+*.o
+
+# native-run SQLite leftovers
+brrr.db
+brrr.db-shm
+brrr.db-wal
+
+# macOS
+.DS_Store
