@@ -6,11 +6,12 @@ the architecture differs.
 
 Implementation: `implementations/thread-per-connection/brrr_threads.c`
 
-- 12,001 users at cgroup 453/500 MB, then kernel OOM-kill: the whole server
-  dies (exit 137). No graceful degradation.
-- ~37.8 KB/user (14.5 KB RSS + ~23 KB kernel/thread stacks).
-- Container throughput: 56,398 @ c=50, 52,761 @ c=200, 39,462 @ c=1000
-  req/s — degrades as concurrency grows (N threads fight for 2 cores).
+- 27,207 users held at the wall (~1 GiB cgroup), then kernel OOM-kill: the
+  whole server dies (exit 137). No graceful degradation.
+- ~37.8 KB/user (14.5 KB RSS + ~23 KB kernel/thread stacks) — envelope-
+  independent, hence the wall scales linearly with RAM.
+- Throughput: 41,438 @ c=200, 31,816 @ c=1000 req/s — degrades as
+  concurrency grows (N threads fight for one core).
 
 Notes: needed a DB mutex (shared statements = data race) and a live-list
 mutex (SIGSEGV without it). The proof models this design as `threadDesign`
@@ -28,6 +29,7 @@ Implementation: `implementations/event-loop-8k16k/brrr.c`
 - Native macOS: 106,707 req/s @ c=100, 107,732 @ c=500 — flat as
   concurrency grows 5× (baseline degrades instead).
 - 2,000 idle conns = ~60 MB RSS (~30 KB/user), `conn_t` 8,264 B.
+- Users at the wall (re-measured, ~1 GiB): 61,172 — OOM-killed, dies.
 
 Notes: `ab` crashes on macOS (APR/kqueue bug); `bench/bench.py` was written
 instead.
@@ -52,7 +54,8 @@ status line.
 
 -----
 
-# Docker envelope: 2 vCPU / 500 MiB, no swap
+# Docker envelope: 2 vCPU / 500 MiB, no swap (superseded — see
+# "Envelope: 1 vCPU / 1 GiB" below)
 
 Alpine 3.20, non-root, DB on volume. cgroups verified from inside the
 container: memory.max=524288000, memory.swap.max=0, cpu.max=200000/100000,
@@ -76,8 +79,8 @@ Halved request header and body caps in `conn_t`.
 Implementation: `implementations/event-loop-4k8k/brrr.c`
 
 - `conn_t`: 26,720 → 14,432 B (-46%).
-- Users at the cgroup wall: 32,004 @ 410.7 MB; overflow connections
-  dropped, server keeps serving.
+- Users at the wall (re-measured, ~1 GiB): 79,926 — OOM-killed at the
+  wall (the ramp burst pushes it over; it does not degrade gracefully).
 
 Notes: earlier walls at 14k/16k users were the macOS client's ephemeral-port
 limit, not the server's.
@@ -104,8 +107,8 @@ kernel socket memory.
 Implementation: `implementations/event-loop-4k2k-sockbuf/brrr.c`
 
 - `conn_t`: 14,432 → 8,288 B.
-- Users at the wall: 32,004 → 36,038 @ 431.7 MB.
-- Throughput improved: 69,356 req/s @ c=200, 0 errors.
+- Users at the wall (re-measured, ~1 GiB): 85,972 — OOM-killed, dies.
+- Throughput: 73,299 @ c=200, 58,828 @ c=1000 req/s, 0 errors.
 
 Notes: bodies > 2 KiB get 413 — accepted tradeoff.
 
@@ -119,12 +122,12 @@ Notes: bodies > 2 KiB get 413 — accepted tradeoff.
 Implementation: `implementations/event-loop/brrr.c`
 
 - `conn_t`: 8,288 → 6,496 B.
-- Users at the wall: 36,038 → 50,864 @ 492.6/500 MB.
-- ~5.9 KB/user RSS + ~3.8 KB/user kernel = ~9.7 KB/user total.
+- Users at the wall (re-measured, ~1 GiB): 106,220 — OOM-killed, dies.
+- ~6 KB/user RSS + ~3.8 KB/user kernel ≈ ~9.7 KB/user total at the wall.
 
 Notes: proof (`Brrr.lean`, repo root) re-synced (eventCost 8192) and
-re-verified; predicted 64,000 userland users vs measured 50,864 = the
-kernel-side memory both designs pay.
+re-verified; predicted 64,000 userland users vs measured 50,864 at the
+500 MiB envelope = the kernel-side memory both designs pay.
 
 -----
 
@@ -141,10 +144,11 @@ Implementation: `implementations/event-loop-lazy-buffers/brrr.c`
 to 1,048,576 so RAM, not the fd table, is the wall)
 
 - `conn_t`: 6,496 → 368 B; ~2.1 KB/userland/user measured (vs 5.9).
-- Users at the wall: 50,864 → **~84,800** (cgroup 492/500 MB, ground-truth
-  connection count via in-container netstat; server alive, drops overflow).
-- Throughput unchanged: 71,141 req/s @ c=200, 60,516 @ c=1000, 0 errors
-  (native: 115,296 @ c=500).
+- Users at the wall (re-measured, ~1 GiB): 173,935 — OOM-killed, dies
+  (survived the gentler 500 MiB/4-probe ramp; the 8-probe burst here
+  pushes its per-connection mallocs over — slab cells keep peak RSS
+  lower and survive).
+- Throughput: 72,738 @ c=200, 55,746 @ c=1000 req/s, 0 errors.
 
 Notes: proof re-synced (eventCost 8192 → 2048) and re-verified. The kernel's
 ~3.7 KB/user (socket buffers, skb, epoll items) is now the floor; going
@@ -167,12 +171,13 @@ Implementation: `implementations/event-loop-cells/brrr.c`
 
 - Cell (`sizeof(conn_t)`): 368 → 1,392 B, but total userland per user:
   ~2.1 → **~1.4 KB** measured (no per-conn malloc headers, no fragmentation;
-  the 492/500 MB wall was partly allocator slack).
-- Users at the wall: 84,800 → **~96,900** (ground-truth netstat count,
-  cgroup ~492/500 MB at the ramp, ~4.3 KB/user steady state; server alive,
-  drops overflow, `OOMKilled: false`).
-- Throughput: 71,141 → **~75k req/s @ c=200** (73.7–79.3k across runs),
-  66–69k @ c=1000, 0 errors. Native: 114,640 @ c=500.
+  the wall was partly allocator slack).
+- Users at the wall: 84,800 → **~96,900** at 500 MiB, **198,738** at the
+  1 GiB envelope (ground-truth netstat count; server alive, drops
+  overflow, `OOMKilled: false` — the only snapshot that survives).
+- Throughput: 71,978 @ c=200, 56,037 @ c=1000 req/s, 0 errors.
+  Native: 114,640 @ c=500. Steady state: 198,750 conns @ 811 MB =
+  ~4.1 KB/user.
 
 Notes: proof re-synced (eventCost 2048 → 1392) and re-verified. ~1.4 KB
 userland + ~2.9 KB kernel per user; the kernel share is the floor now —
@@ -180,23 +185,49 @@ below it needs a userspace TCP stack (a model change, not an optimization).
 
 -----
 
-# Scorecard
+# Envelope: 1 vCPU / 1 GiB (all implementations re-measured)
 
-| Design (2 vCPU / 500 MiB) | `conn_t` | Users at wall | Failure mode |
+The canonical envelope trades a core for RAM: capacity is a memory metric
+and idle users cost no CPU — the single core serves throughput as well as
+two did (~72k vs ~75k req/s @ c=200). Every implementation re-measured
+in the new envelope; per-implementation chart: `bench.png` in each
+implementation's folder; the trail: `bench/scorecard.png`.
+
+Implementation: `docker-compose.yml` (cpus "1.0", mem 1g, memswap 1g,
+1 SO_REUSEPORT worker)
+
+- Users at the wall (ground-truth held sockets, all re-measured):
+  thread 27,207 · 8+16 KiB 61,172 · 4+8 KiB 79,926 · 4+2 KiB+sockbuf
+  85,972 · path 256 106,220 · lazy 173,935 · slab cells **198,738**.
+- At this envelope every earlier snapshot is OOM-killed at its wall —
+  only the slab-cells implementation survives (drops overflow, keeps
+  serving, `OOMKilled: false`).
+- Throughput @ c=200 / c=1000, 0 errors: 41,438/31,816 (thread) …
+  71,978/56,037 (slab cells).
+- Slab cells steady state: 198,750 conns @ 811 MB = ~4.1 KB/user
+  (~1.4 KB userland cell + ~2.7 KB kernel).
+
+Notes: capacity scales linearly with RAM — 198.7k is 2.05× the 96.9k
+measured at 500 MiB, exactly the RAM ratio. Proof re-synced (docstrings;
+eventCost unchanged at 1392) and re-verified.
+
+-----
+
+| Design (1 vCPU / 1 GiB) | `conn_t` | Users at wall | Failure mode |
 |---|---|---|---|
-| thread-per-connection | 6,496 B | 12,001 | OOM-killed, dies |
-| event loop, 8+16 KiB | 26,720 B | ~11,000 (est.) | drops overflow |
-| event loop, 4+8 KiB | 14,432 B | 32,004 | drops overflow |
-| event loop, 4+2 KiB + socket buffers | 8,288 B | 36,038 | drops overflow |
-| event loop, path 256 | 6,496 B | 50,864 | drops overflow |
-| event loop, lazy buffers | 368 B | 84,800 | drops overflow |
-| event loop, slab cells (latest) | 1,392 B cell | **~96,900** | drops overflow |
+| thread-per-connection | 6,496 B | 27,207 | OOM-killed, dies |
+| event loop, 8+16 KiB | 26,720 B | 61,172 | OOM-killed, dies |
+| event loop, 4+8 KiB | 14,432 B | 79,926 | OOM-killed, dies |
+| event loop, 4+2 KiB + socket buffers | 8,288 B | 85,972 | OOM-killed, dies |
+| event loop, path 256 | 6,496 B | 106,220 | OOM-killed, dies |
+| event loop, lazy buffers | 368 B | 173,935 | OOM-killed, dies |
+| event loop, slab cells (latest) | 1,392 B cell | **198,738** | drops overflow, **survives** |
 
-8.1× the measured baseline in identical RAM, plus graceful failure.
-Final throughput: ~75k req/s @ c=200, 0 errors.
+7.3× the measured baseline in identical RAM, plus the only graceful
+failure. Final throughput: 71,978 req/s @ c=200, 0 errors.
 
 Rejected levers: 2 KiB socket buffers (no capacity gain at the wall — kernel
 charges skb usage, not the configured buffer size — at a 9% throughput cost);
 io_uring (throughput only); SQLite sharding. Assembly would raise throughput,
-not capacity. The kernel's ~2.9 KB/user is the floor; below it needs a
+not capacity. The kernel's ~2.7 KB/user is the floor; below it needs a
 userspace TCP stack (a model change, not an optimization).

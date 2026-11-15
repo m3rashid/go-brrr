@@ -42,9 +42,9 @@ def threadCost : Nat := 524288
     1,392-byte slab cell (`conn_t` with inline 512 B request and 512 B response
     buffers, carved from 512 KiB arena blocks — no allocator overhead, freed
     cells reused; growth swaps to the heap only when a request needs it).
-    Measured in the 2-vCPU / 500 MiB container: 1,392 B per user userland
-    (~1.4 KB RSS) and ~2.9 KB kernel memory per idle keep-alive user
-    (total ~4.3 KB/user at the cgroup wall). -/
+    Measured in the 1-vCPU / 1-GiB container: 1,392 B per user userland
+    (~1.4 KB RSS) and ~2.7 KB kernel memory per idle keep-alive user
+    (total ~4.1 KB/user steady state at the cgroup wall). -/
 def eventCost : Nat := 1392
 
 /-- Lower bound for *any* correct server in this model that serves `n` users
@@ -216,15 +216,16 @@ theorem brrr_isOptimal
    workFloor implWork hWork,
    fun k d o => loop_delay_le_thread_delay k d o⟩
 
-/-! ## Illustration: the 500 MiB / 2-vCPU container -/
+/-! ## Illustration: the 1 GiB / 1-vCPU container -/
 
--- #eval capacity eventDesign (500 * 1024 * 1024)   -- = 64000 users (userland bound)
--- #eval capacity threadDesign (500 * 1024 * 1024)  -- = 1000 users
--- 64× more users in the same RAM, from Theorem 1. The measured wall in the
--- real container is ~50,000 users: kernel socket memory (~3.8 KB/user) sits
--- on top of the userland floor, but the 64× ratio over threads still holds.
--- Measured live: ~96,900 concurrent users (ground-truth netstat count) at
--- cgroup ~492/500 MB during ramp, ~4.3 KB/user steady state (up from ~85,000
--- with per-connection mallocs; kernel socket memory is the remaining floor).
+-- #eval capacity eventDesign (1024 * 1024 * 1024)   -- = 131072 users (userland bound)
+-- #eval capacity threadDesign (1024 * 1024 * 1024)  -- = 2048 users
+-- 64× more users in the same RAM, from Theorem 1. The measured wall is
+-- higher still: kernel socket memory (~2.7 KB/user) sits on top of the
+-- userland floor, but the ratio over threads holds in every envelope.
+-- Measured live: 198,738 concurrent users (ground-truth netstat count,
+-- sum of probe-held sockets) at cgroup ~1 GiB during ramp, ~4.1 KB/user
+-- steady state; every earlier snapshot is OOM-killed at the same wall —
+-- only this one survives (drops overflow, keeps serving).
 
 end Brrr

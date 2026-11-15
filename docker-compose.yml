@@ -4,15 +4,15 @@ services:
     image: brrr:latest
     container_name: brrr
     # runs the LATEST implementation (implementations/event-loop-cells/brrr.c)
-    command: ["8080", "2"] # 2 workers for the 2 vCPU envelope
+    command: ["8080", "1"] # 1 worker for the 1 vCPU envelope
     ports:
       - "8080:8080"
     volumes:
       - brrr-data:/data
-    # ---- the resource envelope: 2 vCPU, 500 MiB RAM, no swap escape hatch ----
-    cpus: "2.0"
-    mem_limit: 500m
-    memswap_limit: 500m # mem == memswap => swapping disabled
+    # ---- the resource envelope: 1 vCPU, 1 GiB RAM, no swap escape hatch ----
+    cpus: "1.0"
+    mem_limit: 1g
+    memswap_limit: 1g # mem == memswap => swapping disabled
     pids_limit: 64
     ulimits:
       nofile:

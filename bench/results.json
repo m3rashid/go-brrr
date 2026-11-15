@@ -1,0 +1,13 @@
+{
+  "envelope": {"vcpu": 1, "ram_mb": 1024, "workers": 1, "note": "docker --cpus 1 --memory 1g --memory-swap 1g; nofile 1048576; pids limit not applied in campaign (thread impl must die of memory, not pid cap)"},
+  "metric": "users = ground-truth ESTABLISHED sockets held at the wall (sum of probe-held sockets); throughput = bench/bench.py 20000 req @ c=200 / c=1000 from host over published port",
+  "results": [
+    {"dir": "implementations/thread-per-connection", "label": "thread-per-connection", "conn_t": 6496, "held_at_wall": 27207, "oom_killed": true, "req_c200": 41438, "req_c1000": 31816},
+    {"dir": "implementations/event-loop-8k16k", "label": "event loop, 8+16 KiB", "conn_t": 26720, "held_at_wall": 61172, "oom_killed": true, "req_c200": 72753, "req_c1000": 56105},
+    {"dir": "implementations/event-loop-4k8k", "label": "event loop, 4+8 KiB", "conn_t": 14432, "held_at_wall": 79926, "oom_killed": true, "req_c200": 67087, "req_c1000": 55381},
+    {"dir": "implementations/event-loop-4k2k-sockbuf", "label": "event loop, 4+2 KiB + sockbuf", "conn_t": 8288, "held_at_wall": 85972, "oom_killed": true, "req_c200": 73299, "req_c1000": 58828},
+    {"dir": "implementations/event-loop", "label": "event loop, path 256", "conn_t": 6496, "held_at_wall": 106220, "oom_killed": true, "req_c200": 73111, "req_c1000": 48617},
+    {"dir": "implementations/event-loop-lazy-buffers", "label": "event loop, lazy buffers", "conn_t": 368, "held_at_wall": 173935, "oom_killed": true, "req_c200": 72738, "req_c1000": 55746},
+    {"dir": "implementations/event-loop-cells", "label": "event loop, slab cells (LATEST)", "conn_t": 1392, "held_at_wall": 198738, "oom_killed": false, "req_c200": 71978, "req_c1000": 56037, "steady_kb_per_user": 4.08}
+  ]
+}

@@ -80,51 +80,54 @@ engineering properties, tested below, not proven.
 
 Throughput stays flat as concurrency grows 5× — that is Theorem 3 in action.
 
-## The container envelope (2 vCPU / 500 MiB)
+## The container envelope (1 vCPU / 1 GiB)
 
 ```sh
-docker compose build && docker compose up -d     # 2 CPUs, 500 MiB, no swap
-docker logs brrr                                 # 2 worker event loops
+docker compose build && docker compose up -d     # 1 vCPU, 1 GiB, no swap
+docker logs brrr                                 # 1 worker event loop
 curl localhost:8080/_stats                       # live RSS + conn count
 make bench                                       # throughput
 ```
 
-The envelope is enforced by cgroups (`memory.max=524288000`,
-`memory.swap.max=0`, `cpu.max=200000/100000` — verified from inside the
+The envelope is enforced by cgroups (`memory.max=1073741824`,
+`memory.swap.max=0`, `cpu.max=100000/100000` — verified from inside the
 container). Capacity probes run *inside the Docker network*
 (`capacity.py brrr 8080 ...`), several client containers concurrently.
 
-### Measured inside the envelope (Alpine 3.20, sqlite 3.45, 2 workers)
+### Measured inside the envelope (Alpine 3.20, sqlite 3.45, 1 worker, 1 vCPU / 1 GiB)
 
 | Metric | event loop (latest) | thread-per-conn (baseline) |
 |--------|--------------------|----------------------------------|
-| Throughput, 20k req @ c=50  | — | 56.4k req/s (avg 0.85 ms) |
-| Throughput, 20k req @ c=200 | ~75k req/s, 0 errors | 52.8k req/s (avg 3.4 ms) |
-| Throughput, 20k req @ c=1000 | 66–69k req/s | 39.5k req/s (avg 19.1 ms) |
+| Throughput, 20k req @ c=200 | 71,978 req/s, 0 errors | 41,438 req/s, 0 errors |
+| Throughput, 20k req @ c=1000 | 56,037 req/s | 31,816 req/s |
 | `sizeof(conn_t)` | 1,392 B slab cell (inline buffers) | 6,496 B |
-| **Concurrent users at the wall** | **~96,900** (cgroup ~492/500 MB) | **12,001** (cgroup 453/500 MB) |
-| Memory per idle user | ~1.4 KB userland + ~2.9 KB kernel | ~14.5 KB RSS + ~23 KB kernel (stacks) |
+| **Concurrent users at the wall** | **198,738** (held sockets, ground truth) | **27,207** |
+| Memory per idle user | ~1.4 KB userland + ~2.7 KB kernel | ~14.5 KB RSS + ~23 KB kernel (stacks) |
 | Behavior at the wall | drops overflow, **keeps serving**, `OOMKilled: false` | **kernel OOM-kill, whole server dies** (exit 137) |
 
-### Optimization trail (users fitting in the same 500 MiB)
+Charts: `bench/scorecard.png` (the trail) and `bench.png` in each
+implementation folder (its measured capacity ramp).
+
+### Optimization trail (users fitting in the same 1 GiB, every entry re-measured)
 
 | Step | conn_t | Users at the wall |
 |------|--------|-------------------|
-| thread-per-connection baseline | 6,496 B | 12,001 → **OOM-killed** |
-| event loop, original buffers (8+16 KiB), default sockets | 26,720 B | ~11,000 (est.) |
-| event loop, 4+8 KiB buffers | 14,432 B | 32,004 |
-| event loop, 4+2 KiB buffers, 4 KiB socket buffers | 8,288 B | 36,038 |
-| event loop, path 2048→256 | 6,496 B | 50,864 |
-| event loop, lazy request buffers | 368 B | 84,800 |
-| event loop, slab cells + inline buffers | 1,392 B cell | **~96,900, survives** |
+| thread-per-connection baseline | 6,496 B | 27,207 → **OOM-killed** |
+| event loop, original buffers (8+16 KiB), default sockets | 26,720 B | 61,172 → OOM-killed |
+| event loop, 4+8 KiB buffers | 14,432 B | 79,926 → OOM-killed |
+| event loop, 4+2 KiB buffers, 4 KiB socket buffers | 8,288 B | 85,972 → OOM-killed |
+| event loop, path 2048→256 | 6,496 B | 106,220 → OOM-killed |
+| event loop, lazy request buffers | 368 B | 173,935 → OOM-killed |
+| event loop, slab cells + inline buffers | 1,392 B cell | **198,738, survives** |
 
 Every entry re-measured by holding live connections until the cgroup limit
 (ground-truth connection counts from inside the container at the wall);
-the event loop holds **8.1× the users** of the measured thread baseline in
-the same RAM, and survives the wall instead of being killed (proof Theorem 1
-predicts ≥ 376× at 500 MiB for userland-only memory; the measured gap is
-smaller because kernel socket memory and stacks are paid by both designs —
-thread stacks dominate at ~23 KB/user kernel-side).
+the event loop holds **7.3× the users** of the measured thread baseline in
+the same RAM, and is the only implementation that survives the wall instead
+of being killed (proof Theorem 1 predicts ≥ 376× for userland-only memory
+at any envelope size; the measured gap is smaller because kernel socket
+memory and stacks are paid by both designs — thread stacks dominate at
+~23 KB/user kernel-side).
 
 ## Known limits
 
