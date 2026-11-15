@@ -50,6 +50,11 @@ try:
               f"brrr VmRSS: {rss/1048576:7.1f} MB   cgroup: {cg/1048576:7.1f} MB   "
               f"({rss/max(START+ok,1):,.0f} B/user)", flush=True)
     print(f"target reached ({TARGET} users) without hitting a wall")
+    import os
+    hold = int(os.environ.get("HOLD_SECONDS", "0"))
+    if hold:
+        print(f"holding {len(socks)} sockets for {hold}s...", flush=True)
+        time.sleep(hold)
 except (OSError, socket.timeout) as e:
     print(f"wall hit at {START + ok} users: {e!r}")
     # hold the sockets so ground truth can be sampled from the server

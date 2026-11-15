@@ -185,13 +185,58 @@ below it needs a userspace TCP stack (a model change, not an optimization).
 
 -----
 
+# Rich metrics: allocations, per-connection memory, CPU (harness + charts)
+
+Added an allocation counter and a metrics sampler to the bench harness,
+and rebuilt the charts around four measured dimensions: capacity,
+memory-per-connection, allocator behavior, and CPU cost.
+
+Harness: `bench/alloc_hook.c` (LD_PRELOAD malloc/calloc/realloc/free
+counter, 200 ms dumper thread), `bench/entry.sh` (container entrypoint
+enabling it), `bench/capacity.py` (now also holds on target-reached),
+metrics driver runs idle → load (100k @ c=200, 50k @ c=1000) → 25k-user
+hold with an in-container 300 ms sampler (cgroup memory, cpu.stat, VmRSS,
+netstat conns, alloc counters).
+
+Implementation: `implementations/event-loop-cells/brrr.c` (latest; every
+implementation measured — numbers in `bench/results.json`, per-impl chart
+`bench.png` beside each implementation's code, comparisons in
+`implementations/{scorecard,memory-per-connection,allocator-behavior}.png`)
+
+- CPU per request (cgroup cpu.stat across the 100k @ c=200 window):
+  thread 29.5 µs · 8+16 KiB 19.7 · 4+8 KiB 16.7 · 4+2 KiB 23.0 ·
+  path 256 19.1 · lazy 22.1 · slab cells **17.4 µs**.
+- Heap allocations per 1k requests: ~6.1 for every event-loop snapshot,
+  6.2 for threads — but **0.1 for slab cells** (steady-state serving is
+  allocation-free; the others' ~6 allocs/1k are connection setup amortized
+  over keep-alive reuse).
+- Onboarding 25k users, heap bytes requested per new user: 8+16 KiB
+  54,608 · 4+8 KiB 30,013 · 4+2 KiB 17,661 · thread 14,071 · path 256
+  14,069 · cells 2,703 · lazy 2,298 B — with **alloc events per user:
+  0.02 for cells** (slab chunking) vs 3.0–4.0 for everything else.
+- Marginal memory per connection at the hold ramp (least-squares slope,
+  fixed overhead excluded): cells 1.40 KB userland + ~4.0 KB kernel;
+  lazy 2.16 + ~3.9; path 256 6.05 + ~3.9; 4+2 KiB 8.41 + ~4.0; 4+8 KiB
+  9.32 + ~4.0; 8+16 KiB 13.96 + ~4.0; thread 14.25 + ~25 KB kernel
+  (kernel thread stacks/page tables).
+
+Notes: measured with the alloc hook preloaded ( throughput in this build
+runs ~10–20% under the campaign's clean numbers — interposition overhead
+and run variance; CPU-per-request and alloc counts are unaffected ).
+`sampler`-side note: the in-container sampler's own netstat dominates CPU
+during the hold phase — CPU numbers come from the load windows only.
+
+-----
+
 # Envelope: 1 vCPU / 1 GiB (all implementations re-measured)
 
 The canonical envelope trades a core for RAM: capacity is a memory metric
 and idle users cost no CPU — the single core serves throughput as well as
 two did (~72k vs ~75k req/s @ c=200). Every implementation re-measured
 in the new envelope; per-implementation chart: `bench.png` in each
-implementation's folder; the trail: `bench/scorecard.png`.
+implementation's folder; cross-implementation charts:
+`implementations/scorecard.png`, `implementations/memory-per-connection.png`,
+`implementations/allocator-behavior.png`.
 
 Implementation: `docker-compose.yml` (cpus "1.0", mem 1g, memswap 1g,
 1 SO_REUSEPORT worker)

@@ -105,8 +105,10 @@ container). Capacity probes run *inside the Docker network*
 | Memory per idle user | ~1.4 KB userland + ~2.7 KB kernel | ~14.5 KB RSS + ~23 KB kernel (stacks) |
 | Behavior at the wall | drops overflow, **keeps serving**, `OOMKilled: false` | **kernel OOM-kill, whole server dies** (exit 137) |
 
-Charts: `bench/scorecard.png` (the trail) and `bench.png` in each
-implementation folder (its measured capacity ramp).
+Charts — comparisons across all implementations: `implementations/scorecard.png`,
+`implementations/memory-per-connection.png`, `implementations/allocator-behavior.png`;
+one per implementation, beside its code: `implementations/<impl>/bench.png`
+(capacity ramp + load/hold timeline). Machine-readable numbers: `bench/results.json`.
 
 ### Optimization trail (users fitting in the same 1 GiB, every entry re-measured)
 

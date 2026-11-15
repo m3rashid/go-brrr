@@ -16,8 +16,10 @@ snapshot.
 | `event-loop-lazy-buffers/` | lazy request buffers + `Connection: close` fix | 368 B | 173,935, then OOM-killed |
 | `event-loop-cells/` | slab cells + inline buffers (**latest**) | 1,392 B cell | **198,738, survives** |
 
-Each folder contains `bench.png`: that implementation's measured capacity
-ramp and its position on the trail (`../bench/scorecard.png` compares all).
+Each folder contains `bench.png`: that implementation's own measured
+capacity ramp and metrics-run timeline (load, hold, CPU). Comparison
+charts across all implementations live in this folder:
+`scorecard.png`, `memory-per-connection.png`, `allocator-behavior.png`.
 Numbers were re-measured in the 1 vCPU / 1 GiB envelope; at it, only the
 slab-cells implementation survives the wall — every other snapshot is
 OOM-killed during the connection burst.
