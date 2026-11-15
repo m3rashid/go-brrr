@@ -2,11 +2,12 @@
  * brrr.c — a single-threaded, readiness-based webserver with a SQLite-backed
  * user CRUD API.
  *
- * Design (see proof/Brrr.lean for the formal model):
+ * Design (see Brrr.lean at the repo root for the formal model):
  *   - one process, one thread, zero locks, zero syscalls on shared state;
  *   - epoll (Linux) / kqueue (macOS, *BSD) readiness dispatch: work per
  *     event is O(ready), never O(connected)  [Theorem 3];
- *   - per-connection state is one `conn_t` (BUF_MAX == eventCost)  [Thm 1, 2];
+ *   - per-connection state is one `conn_t` cell (eventCost == sizeof(conn_t),
+ *     request/response buffers inline, growth swaps to the heap)  [Thm 1, 2];
  *   - SQLite runs inside the only thread: no lock contention, WAL journal;
  *   - keep-alive by default, idle connections swept so RAM tracks live users.
  *
@@ -112,7 +113,6 @@ typedef struct conn {
   int keep;              /* keep-alive?                               */
   method_t method;
   int is_head;           /* HEAD: send headers only                    */
-  char path[PATH_MAX_LEN];
   size_t used;           /* bytes buffered                             */
   size_t consumed;       /* bytes of the request handled last          */
   size_t sent;           /* response bytes sent                        */
@@ -128,6 +128,7 @@ typedef struct conn {
 
 static conn_t *live_head;
 static int live_count;       /* real connections currently linked */
+static conn_t *dead_head;    /* closed this event batch, cell not yet reaped */
 
 /* ---- slab arena: one fixed cell per connection -----------------------------
  * A cell is just a conn_t (its inline buffers included), carved from large
@@ -661,10 +662,12 @@ static void resp_simple(conn_t *c, const char *status, const char *body) {
 
 static void pump(poller_t *p, conn_t *c); /* fwd */
 
-/* one buffered, complete request -> response (DB work happens here) */
-static void handle_request(poller_t *p, conn_t *c, const char *body, size_t blen) {
+/* one buffered, complete request -> response (DB work happens here).
+ * `path` lives on the caller's (single) stack: it is only needed while the
+ * request is dispatched, so it costs the cell nothing. */
+static void handle_request(poller_t *p, conn_t *c, const char *path,
+                           const char *body, size_t blen) {
   sbuf_t b;
-  const char *path = c->path;
   method_t m = c->method;
 
   /* observability: per-worker RSS + live connection count */
@@ -821,6 +824,7 @@ static int parse_and_handle(poller_t *p, conn_t *c) {
   size_t hdr = (size_t)he + 4;
 
   /* request line: METHOD SP PATH SP ... */
+  char path[PATH_MAX_LEN]; /* transient: dispatched synchronously below */
   char *sp1 = memchr(c->buf, ' ', he);
   if (!sp1) { c->keep = 0; return -1; }
   size_t mlen = (size_t)(sp1 - c->buf);
@@ -833,9 +837,9 @@ static int parse_and_handle(poller_t *p, conn_t *c) {
     c->consumed = c->used; c->used = 0; c->state = ST_WRITE;
     return 1;
   }
-  memcpy(c->path, sp1 + 1, plen);
-  c->path[plen] = 0;
-  char *q = strchr(c->path, '?'); /* strip query for now */
+  memcpy(path, sp1 + 1, plen);
+  path[plen] = 0;
+  char *q = strchr(path, '?'); /* strip query for now */
   if (q) *q = 0;
 
   c->method = M_OTHER;
@@ -871,7 +875,7 @@ static int parse_and_handle(poller_t *p, conn_t *c) {
   }
 
   c->consumed = hdr + clen;
-  handle_request(p, c, c->buf + hdr, clen);
+  handle_request(p, c, path, c->buf + hdr, clen);
   c->state = ST_WRITE;
   return 1;
 }
@@ -914,6 +918,7 @@ static void pump(poller_t *p, conn_t *c) {
 }
 
 static void on_readable(poller_t *p, conn_t *c) {
+  if (c->fd < 0) return; /* stale event: conn closed earlier this batch */
   for (;;) {
     if (c->used == c->bufcap) {
       if (c->bufcap == BUF_MAX) break; /* full: let pump decide (413/431) */
@@ -932,6 +937,7 @@ static void on_readable(poller_t *p, conn_t *c) {
 }
 
 static void on_writable(poller_t *p, conn_t *c) {
+  if (c->fd < 0) return; /* stale event: conn closed earlier this batch */
   if (c->state == ST_WRITE) pump(p, c);
   else poller_watch(p, c, 1, 0);
 }
@@ -940,10 +946,24 @@ static void on_writable(poller_t *p, conn_t *c) {
 
 static void close_conn(poller_t *p, conn_t *c) {
   if (c == &listener_conn) return;
+  if (c->fd < 0) return; /* already closing: stale event in this batch */
   unlink_conn(c);
   if (c->registered) poller_unwatch(p, c);
   close(c->fd);
-  conn_free_cell(c);
+  c->fd = -1; /* mark dead: other events in this poller_wait snapshot may
+               * still carry this pointer — they must ignore it */
+  /* cell freed at end of batch (reap_dead), not here: a cell reused mid-batch
+   * would alias a live connection under a stale event pointer. */
+  c->next = dead_head;
+  dead_head = c;
+}
+
+static void reap_dead(void) {
+  while (dead_head) {
+    conn_t *c = dead_head;
+    dead_head = c->next;
+    conn_free_cell(c); /* pushes the cell onto the free list for reuse */
+  }
 }
 
 static void accept_all(poller_t *p, int s) {
@@ -1077,6 +1097,7 @@ static void run_worker(int port) {
       if (ev_write(&p, i)) on_writable(&p, c);
       else if (ev_read(&p, i)) on_readable(&p, c);
     }
+    reap_dead(); /* free cells only now: no event in this batch aliases them */
   }
 }
 

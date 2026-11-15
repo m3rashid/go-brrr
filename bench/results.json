@@ -21,7 +21,8 @@
       "rss_kb_per_user": 14.25,
       "cgroup_kb_per_user": 39.3,
       "onboard_bytes_per_user_25k": 14071,
-      "onboard_alloc_events_per_user_25k": 3.02
+      "onboard_alloc_events_per_user_25k": 3.02,
+      "fate": "OOM-killed at the wall (unpaced burst)"
     },
     {
       "dir": "implementations/event-loop-8k16k",
@@ -37,7 +38,8 @@
       "rss_kb_per_user": 13.96,
       "cgroup_kb_per_user": 18.0,
       "onboard_bytes_per_user_25k": 54608,
-      "onboard_alloc_events_per_user_25k": 3.02
+      "onboard_alloc_events_per_user_25k": 3.02,
+      "fate": "OOM-killed at the wall (unpaced burst)"
     },
     {
       "dir": "implementations/event-loop-4k8k",
@@ -53,7 +55,8 @@
       "rss_kb_per_user": 9.32,
       "cgroup_kb_per_user": 13.3,
       "onboard_bytes_per_user_25k": 30013,
-      "onboard_alloc_events_per_user_25k": 3.02
+      "onboard_alloc_events_per_user_25k": 3.02,
+      "fate": "OOM-killed at the wall (unpaced burst)"
     },
     {
       "dir": "implementations/event-loop-4k2k-sockbuf",
@@ -69,7 +72,8 @@
       "rss_kb_per_user": 8.41,
       "cgroup_kb_per_user": 12.4,
       "onboard_bytes_per_user_25k": 17661,
-      "onboard_alloc_events_per_user_25k": 3.02
+      "onboard_alloc_events_per_user_25k": 3.02,
+      "fate": "OOM-killed at the wall (unpaced burst)"
     },
     {
       "dir": "implementations/event-loop",
@@ -85,7 +89,8 @@
       "rss_kb_per_user": 6.05,
       "cgroup_kb_per_user": 10.0,
       "onboard_bytes_per_user_25k": 14069,
-      "onboard_alloc_events_per_user_25k": 3.02
+      "onboard_alloc_events_per_user_25k": 3.02,
+      "fate": "OOM-killed at the wall (unpaced burst)"
     },
     {
       "dir": "implementations/event-loop-lazy-buffers",
@@ -101,25 +106,32 @@
       "rss_kb_per_user": 2.16,
       "cgroup_kb_per_user": 6.1,
       "onboard_bytes_per_user_25k": 2298,
-      "onboard_alloc_events_per_user_25k": 4.03
+      "onboard_alloc_events_per_user_25k": 4.03,
+      "fate": "OOM-killed at the wall (unpaced burst)"
     },
     {
       "dir": "implementations/event-loop-cells",
       "label": "event loop, slab cells (LATEST)",
-      "conn_t": 1392,
-      "held_at_wall": 198738,
+      "conn_t": 1136,
+      "held_at_wall": 208805,
       "oom_killed": false,
       "req_c200": 71978,
       "req_c1000": 56037,
       "steady_kb_per_user": 4.08,
-      "cpu_us_per_req_c200": 17.4,
-      "cpu_us_per_req_c1000": 14.9,
+      "cpu_us_per_req_c200": 17.2,
+      "cpu_us_per_req_c1000": 19.5,
       "heap_allocs_per_1k_req": 0.1,
-      "rss_kb_per_user": 1.4,
-      "cgroup_kb_per_user": 5.4,
-      "onboard_bytes_per_user_25k": 2703,
-      "onboard_alloc_events_per_user_25k": 0.02
+      "rss_kb_per_user": 1.16,
+      "cgroup_kb_per_user": 5.2,
+      "onboard_bytes_per_user_25k": 2242,
+      "onboard_alloc_events_per_user_25k": 0.019,
+      "wall_note": "unpaced burst probes hit the wall at 208,790-208,856 (4 runs); under an instantaneous burst the container is OOM-killed at the wall (burst outpaces reclaim); under a paced ramp (bench/capacity.py PACE_MS) the server never hits the wall at all: idle sweep sheds aged-out conns, OOMKilled: false with 224k attempted users, peak cgroup 566 MB",
+      "fate": "keeps serving under paced load; instantaneous burst at the wall = OOM race"
     }
   ],
-  "metrics_method": "LD_PRELOAD alloc counter (bench/alloc_hook.c) + in-container 300ms sampler; per-conn memory = least-squares slope of RSS/cgroup vs held conns over the 25k-user hold ramp (fixed overhead excluded; hold CPU incl. sampler's own netstat). onboard = heap bytes requested between the pre-hold and post-hold alloc snapshots / users ramped (25k; thread 20k)."
+  "metrics_method": "LD_PRELOAD alloc counter (bench/alloc_hook.c) + in-container 300ms sampler; per-conn memory = least-squares slope of RSS/cgroup vs held conns over the 25k-user hold ramp (fixed overhead excluded; hold CPU incl. sampler's own netstat). onboard = heap bytes requested between the pre-hold and post-hold alloc snapshots / users ramped (25k; thread 20k).",
+  "protocol_note": {
+    "wall": "ground-truth probe-held sockets under unpaced 8-probe bursts (28k target each, HOLD_SECONDS=60)",
+    "survival": "wall survival is burst-pacing dependent, measured both ways on BOTH the 1,392-B cell build and the 1,136-B cell build: unpaced burst -> OOM-killed at the wall (old 198,761, new 208,790-208,856); paced ramp -> both survive with OOMKilled: false and zero wall hits (idle sweep keeps memory at equilibrium, peak 566-567 MB). 'Drops overflow, keeps serving' holds under paced overload; an instantaneous burst at the cap is a race between the burst and kernel reclaim."
+  }
 }

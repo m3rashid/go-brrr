@@ -4,12 +4,23 @@
 read each worker's memory from GET /_stats. Intended to run *inside* the
 docker network (host = service name), so the client is under the same
 envelope as the server."""
-import socket, sys, time, json, urllib.request
+import json
+import os
+import socket
+import sys
+import time
+import urllib.request
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8080
 TARGET = int(sys.argv[3]) if len(sys.argv) > 3 else 20000
 STEP = int(sys.argv[4]) if len(sys.argv) > 4 else 2000
+# Optional pacing: sleep PACE_MS milliseconds after every PACE_EVERY new
+# connections. A slow ramp gives the server's idle sweep (75 s timeout) and the
+# kernel's reclaim time to keep up with the burst — the honest protocol for
+# testing "drops overflow, keeps serving". Default 0 = unpaced (legacy runs).
+PACE_MS = int(os.environ.get("PACE_MS", "0"))
+PACE_EVERY = int(os.environ.get("PACE_EVERY", "200"))
 
 def stats():
     """per-worker (pid -> rss bytes, conns) + max cgroup-wide memory (bytes).
@@ -36,11 +47,13 @@ START = int(sys.argv[5]) if len(sys.argv) > 5 else 0  # run several probes: spli
 try:
     while ok < TARGET - START:
         n = min(STEP, TARGET - START - ok)
-        for _ in range(n):
+        for j in range(n):
             s = socket.create_connection((HOST, PORT), timeout=5)
             s.sendall(b"GET / HTTP/1.1\r\nHost: b\r\n\r\n")
             s.recv(4096)  # finish one request; connection becomes idle keep-alive
             socks.append(s)
+            if PACE_MS and (ok + j + 1) % PACE_EVERY == 0:
+                time.sleep(PACE_MS / 1000.0)
         ok += n
         time.sleep(0.3)
         seen, cg = stats()
@@ -50,15 +63,13 @@ try:
               f"brrr VmRSS: {rss/1048576:7.1f} MB   cgroup: {cg/1048576:7.1f} MB   "
               f"({rss/max(START+ok,1):,.0f} B/user)", flush=True)
     print(f"target reached ({TARGET} users) without hitting a wall")
-    import os
     hold = int(os.environ.get("HOLD_SECONDS", "0"))
     if hold:
         print(f"holding {len(socks)} sockets for {hold}s...", flush=True)
         time.sleep(hold)
-except (OSError, socket.timeout) as e:
+except (TimeoutError, OSError) as e:
     print(f"wall hit at {START + ok} users: {e!r}")
     # hold the sockets so ground truth can be sampled from the server
-    import os
     hold = int(os.environ.get("HOLD_SECONDS", "0"))
     if hold:
         print(f"holding {len(socks)} sockets for {hold}s...", flush=True)

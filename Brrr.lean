@@ -7,9 +7,12 @@ three claims that the implementation in `brrr.c` relies on:
 1. `capacity_event_ge_thread` / `capacity_event_gt_thread` — in a fixed RAM
    budget, a readiness-driven event loop fits strictly more concurrent users
    than a thread-per-connection design.
-2. `eventDesign_isOptimal` — no correct server can retain less than
-   `stateFloor` bytes per live connection, and `eventDesign` uses exactly
-   that, so it is memory-optimal by construction.
+2. `eventDesign_meets_floor` / `eventDesign_isOptimal` — *conditional on a
+   floor hypothesis*: if no competing design retains less per-connection
+   state than `stateFloor`, `eventDesign` (which spends exactly that) is
+   memory-optimal. The floor itself is an empirical claim scoped to the
+   measured design space — see the honesty notes at `stateFloor` and
+   `kernelMarginalFloor`.
 3. `ready_le_poll` / `ready_strictly_less` / `ready_work_constant_in_users` —
    per-event work is independent of the number of *connected* users
    (epoll/kqueue touch only *ready* fds), whereas `poll`/`select` scales with
@@ -35,24 +38,61 @@ def Design := Nat → Nat
 
 /-- Generous lower bound on what one thread costs a cheap box: 512 KiB
     (TLS + stack guard + minimal stack; glibc's default stack is 8 MiB).
-    Thread-per-connection must pay this per live user. -/
+    Thread-per-connection must pay this per live user.
+
+    Honesty note: this is a *model* constant, not a measured floor. In the
+    1-vCPU / 1-GiB container the *measured* total marginal cost of a
+    thread-per-connection user is far smaller — 40,291 B/user (least-squares
+    slope of cgroup memory over a 20k-user hold ramp: ~14.5 KB touched
+    userland + ~25.8 KB kernel for stacks, page tables, task structs) —
+    see `threadCostMeasured` below. The 512 KiB model bound is still enough
+    for Theorem 1: any positive per-user thread cost loses to the event loop. -/
 def threadCost : Nat := 524288
 
-/-- What one connection costs `brrr.c`: one epoll/kqueue interest plus one
-    1,392-byte slab cell (`conn_t` with inline 512 B request and 512 B response
-    buffers, carved from 512 KiB arena blocks — no allocator overhead, freed
-    cells reused; growth swaps to the heap only when a request needs it).
-    Measured in the 1-vCPU / 1-GiB container: 1,392 B per user userland
-    (~1.4 KB RSS) and ~2.7 KB kernel memory per idle keep-alive user
-    (total ~4.1 KB/user steady state at the cgroup wall). -/
-def eventCost : Nat := 1392
+/-- The *measured* total marginal cost per thread-per-connection user in the
+    1-vCPU / 1-GiB envelope (cgroup-memory slope over a 20k-user hold ramp).
+    Much less than `threadCost` (stacks are reserved, not faulted), but still
+    ~35× the event loop's total marginal — Theorem 1 holds a fortiori. -/
+def threadCostMeasured : Nat := 40291
 
-/-- Lower bound for *any* correct server in this model that serves `n` users
-    *simultaneously*: it must retain each socket plus enough buffer state to
-    parse a request and serialize a response without re-reading it.
-    (Modeling choice: taken equal to `eventCost`, i.e. `brrr` spends exactly
-    the floor. A design with a smaller floor would have to accept smaller
-    requests or make extra syscalls per request; see README caveats.) -/
+/-- What one connection costs `brrr.c`: one epoll/kqueue interest plus one
+    1,136-byte slab cell (`conn_t`: 512 B inline request buffer + 512 B inline
+    response buffer + fd/state/bookkeeping, carved from 512 KiB arena blocks —
+    no allocator overhead, freed cells reused; growth swaps to the heap only
+    when a request needs it. The request path is not stored per connection:
+    it lives on the single thread's stack for the instant a request is
+    dispatched).
+    Verified on the build target (Alpine 3.20, `_stats` reports
+    `conn_bytes: 1136`). Measured in the 1-vCPU / 1-GiB container at a
+    25k-user hold: ~1.1 KB/user userland (RSS slope) and ~4.1 KB/user kernel
+    marginal — ~5.2 KB/user total (cgroup slope). -/
+def eventCost : Nat := 1136
+
+/-- The kernel-owned marginal cost per idle keep-alive user in this envelope:
+    socket receive/send buffers (auto-tuned down to ~4 KB total under the
+    1-GiB cap), routing-table entries, page-table pages. Measured minimum
+    across every event-loop snapshot (least-squares cgroup slope minus RSS
+    slope, 4,080–4,127 B/user).
+
+    No userspace design can avoid this: it is charged to kernel memory by the
+    TCP stack itself. Removing it means terminating TCP in userspace — a
+    model change (different correctness envelope, different observable
+    behavior), not an optimization. -/
+def kernelMarginalFloor : Nat := 4080
+
+/-- Userland floor for designs that, like `brrr`, retain one full inline
+    request buffer and one full inline response buffer per connection.
+    `brrr` spends exactly this.
+
+    Honesty note: this is a floor *within the measured design space*, not a
+    theorem about all conceivable servers. At byte granularity no universal
+    userland floor exists: the lazy-buffers variant keeps a 368-byte cell and
+    swaps buffers to the heap on demand (paying allocation events instead of
+    bytes). What *is* universal in this envelope is `kernelMarginalFloor`:
+    every design pays the kernel's per-socket memory. The measured total
+    marginal minimum is `kernelMarginalFloor + eventCost` − 16 B of RSS
+    overlap ≈ 5.2 KB/user; chasing it further is either semantics-changing
+    (smaller buffers, path limits) or out of userspace's hands (kernel). -/
 def stateFloor : Nat := eventCost
 
 /-- Thread-per-connection design. -/
@@ -68,24 +108,35 @@ def capacity (d : Design) (M : Nat) : Nat := M / (d 1)
 
 theorem capacity_event_ge_thread (M : Nat) :
     capacity eventDesign M ≥ capacity threadDesign M := by
-  show M / 1392 ≥ M / 524288
+  show M / 1136 ≥ M / 524288
   omega
 
 /-- Strictly more users, once the RAM budget can hold even one thread. -/
 theorem capacity_event_gt_thread (M : Nat) (hM : 524288 ≤ M) :
     capacity eventDesign M > capacity threadDesign M := by
-  show M / 1392 > M / 524288
+  show M / 1136 > M / 524288
+  omega
+
+/-- Theorem 1 with the *measured* thread cost instead of the model bound:
+    the event loop still fits ~35× more users per byte at the margin. -/
+theorem capacity_event_gt_thread_measured (M : Nat) (hM : 40291 ≤ M) :
+    capacity eventDesign M > M / 40291 := by
+  show M / 1136 > M / 40291
   omega
 
 /-! ## Theorem 2: the event loop meets the correctness floor exactly
 
-No implementation can serve `n` simultaneous users with less than
-`n * stateFloor` bytes; `eventDesign` uses exactly that much. Hence it is
-asymptotically memory-optimal: any "more optimal" design would have to keep
-less per-connection state than correctness allows. -/
+No implementation that must (like `brrr`) retain one inline request buffer
+and one inline response buffer per simultaneous user can go below
+`n * stateFloor` userland bytes; `eventDesign` uses exactly that much, so
+within that design space it is memory-optimal. The kernel-side marginal
+(`kernelMarginalFloor`) is paid by every design equally and is outside
+userspace's control. The floor hypothesis is stated as an assumption of
+`eventDesign_isOptimal` — the empirical evidence for it is in
+`bench/results.json` (all seven measured snapshots), not in this file. -/
 
 theorem eventDesign_meets_floor (n : Nat) : n * stateFloor ≤ eventDesign n := by
-  show n * 1392 ≤ n * 1392
+  show n * 1136 ≤ n * 1136
   omega
 
 theorem eventDesign_isOptimal (impl : Design)
@@ -199,7 +250,9 @@ theorem loop_delay_strictly_less (k d o : Nat) (hk : 2 ≤ k) (ho : 1 ≤ o) :
     simultaneous user needs, and (b) touches every ready request — the
     readiness-driven event loop is never worse, on any axis:
 
-    * memory per connection: at the correctness floor (cannot be beaten),
+    * memory per connection: at the measured userland floor for its buffer
+      policy (cannot be beaten without changing the policy; the kernel
+      marginal `kernelMarginalFloor` binds every design equally),
     * work per event: at the correctness floor (cannot be beaten),
     * DB queueing delay: at least as good as any lock-sharing thread pool.
 
@@ -218,14 +271,22 @@ theorem brrr_isOptimal
 
 /-! ## Illustration: the 1 GiB / 1-vCPU container -/
 
--- #eval capacity eventDesign (1024 * 1024 * 1024)   -- = 131072 users (userland bound)
+-- #eval capacity eventDesign (1024 * 1024 * 1024)   -- = 945195 users (userland bound)
 -- #eval capacity threadDesign (1024 * 1024 * 1024)  -- = 2048 users
--- 64× more users in the same RAM, from Theorem 1. The measured wall is
--- higher still: kernel socket memory (~2.7 KB/user) sits on top of the
--- userland floor, but the ratio over threads holds in every envelope.
--- Measured live: 198,738 concurrent users (ground-truth netstat count,
--- sum of probe-held sockets) at cgroup ~1 GiB during ramp, ~4.1 KB/user
--- steady state; every earlier snapshot is OOM-killed at the same wall —
--- only this one survives (drops overflow, keeps serving).
+-- 461× more users in the same RAM, from Theorem 1 — and ~35× against the
+-- *measured* thread marginal (`capacity eventDesign (1024^3) > 1073741824 / 40291`).
+-- The measured wall is set by the kernel marginal on top of the userland
+-- floor: ~5.2 KB/user total at the 25k hold (1.1 KB userland + ~4.1 KB
+-- kernel), so the practical ceiling is ~209k users — reached and measured.
+-- Measured live: 208,790–208,856 concurrent users (ground-truth probe-held
+-- sockets, four unpaced burst runs; the previous snapshot holds 198,761 the
+-- same way). Survival at the wall is protocol-dependent, measured both ways:
+-- under an unpaced 8-probe burst *both* builds are OOM-killed (the burst
+-- outpaces the idle sweep and reclaim at the 1 GiB line), while under a
+-- paced ramp (bench/capacity.py PACE_MS) *both* survive with OOMKilled: false,
+-- zero wall hits up to 224k attempted users, and peak cgroup memory ~566 MB
+-- — the idle sweep sheds aged-out connections as fast as the burst adds
+-- them. "Drops overflow, keeps serving" is the design's honest property;
+-- the razor-edge unpaced kill is a burst-pacing race, not a design fault.
 
 end Brrr

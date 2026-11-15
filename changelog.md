@@ -276,3 +276,71 @@ charges skb usage, not the configured buffer size — at a 9% throughput cost);
 io_uring (throughput only); SQLite sharding. Assembly would raise throughput,
 not capacity. The kernel's ~2.7 KB/user is the floor; below it needs a
 userspace TCP stack (a model change, not an optimization).
+
+-----
+
+# Verification round: code ↔ proof 1:1, ceiling audit, last userland levers
+
+Two verifications asked: (1) is the latest code exactly 1:1 with the Lean
+proof, (2) is this the ceiling — no more practical optimizations.
+
+Implementation: `implementations/event-loop-cells/brrr.c` (latest)
+
+- **1:1 fixes taken from the audit.** `eventCost` in `Brrr.lean` was 1,392
+  and matched `sizeof(conn_t)` exactly — but two stale artifacts existed:
+  the code comment claimed `BUF_MAX == eventCost` (BUF_MAX is 6,144), and
+  the comment pointed at `proof/Brrr.lean` (the proof is at the repo root).
+  One real lever remained: `conn_t` stored `char path[256]`, needed only
+  while a request is dispatched synchronously → moved to the single
+  thread's stack. Cell: **1,392 → 1,136 B** (verified on the Alpine target
+  via `_stats` `conn_bytes: 1136`), semantics unchanged (414/404/400
+  re-verified). Proof re-synced and re-verified (`eventCost := 1136`).
+- **Real bug found by the churn protocol, fixed.** Under extreme connection
+  churn (224k attempted users, paced ramp) `_stats` reported `conns:
+  -93090` — double-closes: `close_conn` freed the slab cell immediately
+  while later events in the same `poller_wait` snapshot still pointed at
+  it (use-after-free → double unlink, cell double-pushed to the free
+  list). Fixed with mark-dead (`c->fd = -1`) + deferred reaping
+  (`reap_dead()` after each event batch) + stale-event guards in
+  `on_readable`/`on_writable`. The bug predates this round (the committed
+  1,392-B build shows the same `-91799` underflow) — it is a correctness
+  fix, not a regression. Also noted: `_stats` `conns` is `int`; with the
+  fix it stays correct.
+- **Wall survival is burst-pacing dependent — measured both ways on BOTH
+  cell builds.** Unpaced 8-probe bursts (28k target each): new build holds
+  **208,790–208,856** over 4 runs and is OOM-killed at the wall; control
+  with the committed 1,392-B build (`brrr-bench:oldcells`, same protocol):
+  198,761 held, also OOM-killed — the earlier "only survivor" was
+  razor-edge luck at the cap, not a robust property. Paced ramp
+  (`bench/capacity.py` gained `PACE_MS`/`PACE_EVERY`): BOTH builds survive
+  with `OOMKilled: false`, zero wall hits up to 224k attempted users, peak
+  cgroup memory 566–567 MB — the 75 s idle sweep sheds aged-out
+  connections as fast as the burst adds them, so the server never
+  accumulates to the cap. "Drops overflow, keeps serving" is the honest
+  property under paced overload; a kill at the cap is a pacing race.
+- **Proof honesty updates** (`Brrr.lean`, re-verified): `eventCost := 1136`
+  with the path-on-stack docstring; `threadCost` (512 KiB) documented as a
+  model constant — the *measured* thread marginal is
+  `threadCostMeasured := 40291` B/user (cgroup slope at a 20k hold), with
+  `capacity_event_gt_thread_measured` (~35×); `kernelMarginalFloor :=
+  4080` (kernel socket/TCP memory per user, unreachable from userspace —
+  removing it means a userspace TCP stack, a model change);
+  `stateFloor` honesty: byte-granularity userland floors don't exist
+  without fixing the buffer policy (the lazy variant's cell is 368 B) —
+  Theorem 2 is now explicitly conditional on the floor hypothesis, scoped
+  to the measured design space. Illustration: 945,195 vs 2,048 userland
+  bound (461×), measured wall 208,805.
+- **Fresh cells metrics** (fixed build, clean run): 17.2 µs CPU/req
+  @ c=200 (19.5 @ c=1000, run variance); **0.10 heap allocs/1k req**;
+  onboarding 25k users **2,242 B/user at 0.019 alloc events/user**;
+  slopes at the 25k hold: 1,162 B/user userland (RSS) + 4,038 B/user
+  kernel (cgroup) = 5,200 B/user total — the kernel share (~4.0 KB) is
+  the binding floor now.
+
+Ceiling verdict (2): at 1 vCPU the server is CPU-bound in throughput
+(~17 µs/req is SQLite + parse + syscalls); capacity is pinned by the
+kernel's ~4.0 KB/user marginal, which no userspace code can reduce —
+the remaining userspace trims are semantics-changing (smaller buffers,
+shorter paths, smaller bodies) or sub-1% (the 256 B path was the last
+real one). Chasing further means changing the model, not optimizing
+this one.

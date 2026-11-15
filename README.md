@@ -100,10 +100,10 @@ container). Capacity probes run *inside the Docker network*
 |--------|--------------------|----------------------------------|
 | Throughput, 20k req @ c=200 | 71,978 req/s, 0 errors | 41,438 req/s, 0 errors |
 | Throughput, 20k req @ c=1000 | 56,037 req/s | 31,816 req/s |
-| `sizeof(conn_t)` | 1,392 B slab cell (inline buffers) | 6,496 B |
-| **Concurrent users at the wall** | **198,738** (held sockets, ground truth) | **27,207** |
-| Memory per idle user | ~1.4 KB userland + ~2.7 KB kernel | ~14.5 KB RSS + ~23 KB kernel (stacks) |
-| Behavior at the wall | drops overflow, **keeps serving**, `OOMKilled: false` | **kernel OOM-kill, whole server dies** (exit 137) |
+| `sizeof(conn_t)` | 1,136 B slab cell (inline buffers, path on stack) | 6,496 B |
+| **Concurrent users at the wall** | **208,805** (held sockets, ground truth; range 208,790–208,856 over 4 runs) | **27,207** |
+| Memory per idle user | ~1.2 KB userland + ~4.0 KB kernel | ~14.5 KB RSS + ~23 KB kernel (stacks) |
+| Behavior at the wall | drops overflow, **keeps serving** under paced load (`OOMKilled: false`); an instantaneous burst at the cap races reclaim and can be OOM-killed | **kernel OOM-kill, whole server dies** (exit 137) |
 
 Charts — comparisons across all implementations: `implementations/scorecard.png`,
 `implementations/memory-per-connection.png`, `implementations/allocator-behavior.png`;
@@ -120,16 +120,26 @@ one per implementation, beside its code: `implementations/<impl>/bench.png`
 | event loop, 4+2 KiB buffers, 4 KiB socket buffers | 8,288 B | 85,972 → OOM-killed |
 | event loop, path 2048→256 | 6,496 B | 106,220 → OOM-killed |
 | event loop, lazy request buffers | 368 B | 173,935 → OOM-killed |
-| event loop, slab cells + inline buffers | 1,392 B cell | **198,738, survives** |
+| event loop, slab cells + inline buffers | 1,392 B cell | **198,738** |
+| event loop, request path on the stack + double-close fix | 1,136 B cell | **208,805** (survives paced; see protocol note) |
 
 Every entry re-measured by holding live connections until the cgroup limit
 (ground-truth connection counts from inside the container at the wall);
-the event loop holds **7.3× the users** of the measured thread baseline in
-the same RAM, and is the only implementation that survives the wall instead
-of being killed (proof Theorem 1 predicts ≥ 376× for userland-only memory
+the event loop holds **7.7× the users** of the measured thread baseline in
+the same RAM (proof Theorem 1 predicts ≥ 461× for userland-only memory
 at any envelope size; the measured gap is smaller because kernel socket
 memory and stacks are paid by both designs — thread stacks dominate at
 ~23 KB/user kernel-side).
+
+Wall-survival protocol note (measured both ways on both cell builds): under
+an unpaced 8-probe connection burst *every* build — old 1,392-B cell
+included — is OOM-killed at its wall (the burst outpaces reclaim at the
+1 GiB line). Under a paced ramp (`bench/capacity.py`, `PACE_MS`) both builds
+survive with `OOMKilled: false`, zero wall hits up to 224k attempted users,
+peak cgroup memory ~566 MB: the idle sweep sheds aged-out connections as
+fast as the burst adds them. "Drops overflow, keeps serving" is the honest
+property under paced overload; a razor-edge burst kill is pacing, not
+design.
 
 ## Known limits
 
