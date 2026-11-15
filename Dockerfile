@@ -13,7 +13,7 @@ COPY implementations ./implementations
 RUN make
 
 FROM alpine:3.20
-# latest implementation: implementations/event-loop-lazy-buffers/brrr.c
+# latest implementation: implementations/event-loop-cells/brrr.c
 RUN apk add --no-cache sqlite-libs \
     && adduser -D -H -s /sbin/nologin brrr \
     && mkdir /data && chown brrr:brrr /data

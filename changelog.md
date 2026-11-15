@@ -128,7 +128,7 @@ kernel-side memory both designs pay.
 
 -----
 
-# Lazy buffers + `Connection: close` fix (latest implementation)
+# Lazy buffers + `Connection: close` fix
 
 `conn_t` no longer embeds its worst-case buffers: the request buffer starts
 at 512 B and grows geometrically (to `BUF_MAX`) only when a request needs
@@ -152,6 +152,34 @@ lower needs 2 KiB socket buffers or a userspace TCP stack.
 
 -----
 
+# Slab cells + inline buffers (latest implementation)
+
+Per-connection state becomes one fixed-size slab cell: `conn_t` with inline
+512 B request and 512 B response buffers, carved from 512 KiB arena blocks
+on a freelist — no allocator overhead, no fragmentation, freed cells reused.
+Buffer growth swaps inline → heap only when a request needs it. 2 KiB
+socket buffers were tried and **rejected**: identical capacity at the wall
+(96,860 vs 96,853 held sockets — kernel charges socket memory by actual
+skb usage, and idle users have none) at a 9% throughput cost. Kept 4 KiB.
+
+Implementation: `implementations/event-loop-cells/brrr.c`
+(LATEST — Dockerfile, compose, `make` run this)
+
+- Cell (`sizeof(conn_t)`): 368 → 1,392 B, but total userland per user:
+  ~2.1 → **~1.4 KB** measured (no per-conn malloc headers, no fragmentation;
+  the 492/500 MB wall was partly allocator slack).
+- Users at the wall: 84,800 → **~96,900** (ground-truth netstat count,
+  cgroup ~492/500 MB at the ramp, ~4.3 KB/user steady state; server alive,
+  drops overflow, `OOMKilled: false`).
+- Throughput: 71,141 → **~75k req/s @ c=200** (73.7–79.3k across runs),
+  66–69k @ c=1000, 0 errors. Native: 114,640 @ c=500.
+
+Notes: proof re-synced (eventCost 2048 → 1392) and re-verified. ~1.4 KB
+userland + ~2.9 KB kernel per user; the kernel share is the floor now —
+below it needs a userspace TCP stack (a model change, not an optimization).
+
+-----
+
 # Scorecard
 
 | Design (2 vCPU / 500 MiB) | `conn_t` | Users at wall | Failure mode |
@@ -161,10 +189,14 @@ lower needs 2 KiB socket buffers or a userspace TCP stack.
 | event loop, 4+8 KiB | 14,432 B | 32,004 | drops overflow |
 | event loop, 4+2 KiB + socket buffers | 8,288 B | 36,038 | drops overflow |
 | event loop, path 256 | 6,496 B | 50,864 | drops overflow |
-| event loop, lazy buffers (latest) | 368 B | **~84,800** | drops overflow |
+| event loop, lazy buffers | 368 B | 84,800 | drops overflow |
+| event loop, slab cells (latest) | 1,392 B cell | **~96,900** | drops overflow |
 
-7.1× the measured baseline in identical RAM, plus graceful failure.
-Final throughput: 71,141 req/s @ c=200, 0 errors.
+8.1× the measured baseline in identical RAM, plus graceful failure.
+Final throughput: ~75k req/s @ c=200, 0 errors.
 
-Next levers not taken: 2 KiB socket buffers (~-0.7 KB/user), io_uring,
-SQLite sharding. Assembly would raise throughput, not capacity.
+Rejected levers: 2 KiB socket buffers (no capacity gain at the wall — kernel
+charges skb usage, not the configured buffer size — at a 9% throughput cost);
+io_uring (throughput only); SQLite sharding. Assembly would raise throughput,
+not capacity. The kernel's ~2.9 KB/user is the floor; below it needs a
+userspace TCP stack (a model change, not an optimization).
